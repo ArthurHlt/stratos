@@ -18,7 +18,11 @@ import { ActiveRouteCfOrgSpace } from '../../../../../features/cloud-foundry/cf-
 import {
   canUpdateOrgSpaceRoles,
   createCfOrgSpaceSteppersUrl,
+  createCfOrgSpaceUserRemovalUrl,
   waitForCFPermissions,
+  hasRoleWithin,
+  hasRoleWithinSpace,
+  hasSpaceRoleWithinOrg,
 } from '../../../../../features/cloud-foundry/cf.helpers';
 import { CfUserService } from './../../../../data-services/cf-user.service';
 import { ITableColumn } from './../../list-table/table.types';
@@ -34,14 +38,21 @@ import { CfSpacePermissionCellComponent } from './cf-space-permission-cell/cf-sp
 import { CfUserDataSourceService } from './cf-user-data-source.service';
 import { userHasRole, UserListUsersVisible, userListUserVisibleKey } from './cf-user-list-helpers';
 
-const defaultUserHasRoles: (user: CfUser) => boolean = (user: CfUser): boolean => {
-  return userHasRole(user, 'organizations') ||
-    userHasRole(user, 'spaces') ||
-    userHasRole(user, 'managed_organizations') ||
+const defaultUserHasSpaceRoles: (user: CfUser) => boolean = (user: CfUser): boolean => {
+  return userHasRole(user, 'spaces') ||
     userHasRole(user, 'managed_spaces') ||
+    userHasRole(user, 'audited_spaces');
+};
+
+const defaultUserHasOrgRoles: (user: CfUser) => boolean = (user: CfUser): boolean => {
+  return userHasRole(user, 'organizations') ||
+    userHasRole(user, 'managed_organizations') ||
     userHasRole(user, 'audited_organizations') ||
-    userHasRole(user, 'audited_spaces') ||
     userHasRole(user, 'billing_managed_organizations');
+};
+
+const defaultUserHasRoles: (user: CfUser) => boolean = (user: CfUser): boolean => {
+  return defaultUserHasOrgRoles(user) || defaultUserHasSpaceRoles(user);
 };
 
 export class CfUserListConfigService extends ListConfig<APIResource<CfUser>> {
@@ -109,10 +120,73 @@ export class CfUserListConfigService extends ListConfig<APIResource<CfUser>> {
     description: `Manage roles`,
   };
 
+  removeUserActions(): IListAction<APIResource<CfUser>>[] {
+    const activeRouteCfOrgSpace = this.cfUserService.activeRouteCfOrgSpace;
+    const orgGuid = activeRouteCfOrgSpace.orgGuid;
+    const spaceGuid = activeRouteCfOrgSpace.spaceGuid;
+    const isCfContext = !orgGuid && !spaceGuid;
+
+    const action = (withSpaces?: boolean) => {
+      return (user: APIResource<CfUser>) => {
+        const queryParams = { queryParams: { user: user.entity.guid, spaces: withSpaces } };
+
+        this.store.dispatch(new UsersRolesSetUsers(activeRouteCfOrgSpace.cfGuid, [user.entity]));
+        this.router.navigate([this.createRemoveUserUrl()], queryParams);
+      };
+    };
+
+    const fromSpaces: IListAction<APIResource<CfUser>> = {
+      action: action(true),
+      label: (() => (spaceGuid) ? 'Remove from space' : 'Remove from spaces')(),
+      createVisible: (userRow$: Observable<APIResource<CfUser>>) => combineLatest(
+        userRow$,
+        this.createCanUpdateOrgSpaceRoles()
+      ).pipe(
+        map(([user, canUpdateRoles]) => {
+          const hasRole = (spaceGuid && hasRoleWithinSpace(user.entity, spaceGuid)) ||
+            (orgGuid && hasSpaceRoleWithinOrg(user.entity, orgGuid)) ||
+            (isCfContext && defaultUserHasSpaceRoles(user.entity));
+
+          return canUpdateRoles && hasRole;
+        })
+      )
+    };
+
+    const fromOrgsSpaces: IListAction<APIResource<CfUser>> = {
+      action: action(),
+      label: (() => (orgGuid) ? 'Remove from org and spaces' : 'Remove from orgs and spaces')(),
+      createVisible: (userRow$: Observable<APIResource<CfUser>>) => combineLatest(
+        userRow$,
+        this.createCanUpdateOrgRoles()
+      ).pipe(
+        map(([user, canUpdateRoles]) => {
+          const hasRole = (orgGuid && hasRoleWithin(user.entity, orgGuid, spaceGuid)) ||
+            (isCfContext && defaultUserHasOrgRoles(user.entity));
+
+          return canUpdateRoles && hasRole;
+        })
+      )
+    };
+
+    if (spaceGuid) {
+      return [fromSpaces];
+    }
+
+    return [fromOrgsSpaces, fromSpaces];
+  }
+
   protected createManagerUsersUrl(): string {
     return createCfOrgSpaceSteppersUrl(
       this.cfUserService.activeRouteCfOrgSpace.cfGuid,
       `/users/manage`,
+      this.activeRouteCfOrgSpace.orgGuid,
+      this.activeRouteCfOrgSpace.spaceGuid
+    );
+  }
+
+  protected createRemoveUserUrl(): string {
+    return createCfOrgSpaceUserRemovalUrl(
+      this.cfUserService.activeRouteCfOrgSpace.cfGuid,
       this.activeRouteCfOrgSpace.orgGuid,
       this.activeRouteCfOrgSpace.spaceGuid
     );
@@ -261,10 +335,15 @@ export class CfUserListConfigService extends ListConfig<APIResource<CfUser>> {
     this.activeRouteCfOrgSpace.orgGuid && !this.activeRouteCfOrgSpace.spaceGuid ?
       CurrentUserPermissionsChecker.ALL_SPACES : this.activeRouteCfOrgSpace.spaceGuid)
 
+  private createCanUpdateOrgRoles = () => canUpdateOrgSpaceRoles(
+    this.userPerms,
+    this.activeRouteCfOrgSpace.cfGuid,
+    this.activeRouteCfOrgSpace.orgGuid)
+
   getColumns = () => this.columns;
   getGlobalActions = () => [];
   getMultiActions = () => [this.manageMultiUserAction];
-  getSingleActions = () => [this.manageUserAction];
+  getSingleActions = () => [this.manageUserAction, ...this.removeUserActions()];
   getMultiFiltersConfigs = () => this.multiFilterConfigs;
   getDataSource = () => this.dataSource;
   getInitialised = () => this.initialised;
